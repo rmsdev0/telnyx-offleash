@@ -12,12 +12,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import time
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from offleash import metrics
 from offleash.agent import VoiceAgent
 from offleash.limits import CallLimiter
 from offleash.logging import setup_logging
@@ -29,6 +32,25 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 log = structlog.get_logger()
+
+class _BenchHook(Protocol):
+    """The barge-in harness, attached to app.state.bench only in bench mode.
+
+    handle_webhook observes every event (recording leg timing) and returns True
+    for events on a harness-owned leg so the normal dispatch is skipped for it.
+    In production app.state.bench is unset and none of this runs.
+    """
+
+    async def handle_webhook(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        call_control_id: str,
+        occurred_at: str,
+        t_recv: float,
+        w_recv: float,
+    ) -> bool: ...
+
 
 # Telnyx call webhooks are a few KB. Cap the body so an unauthenticated client
 # (one who cannot forge a valid Ed25519 signature) cannot exhaust memory on the
@@ -59,9 +81,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # call_control_id -> VoiceAgent. Single event loop, so a plain dict is safe.
     app.state.agents = {}
     log.info("offleash.startup", env=settings.env, port=settings.port)
+
+    # Bench mode: attach the barge-in harness so it owns its outbound leg and
+    # records timing. Imported lazily here, never at module load, so the shipping
+    # import graph does not depend on bench/.
+    bench_task: asyncio.Task[None] | None = None
+    if os.environ.get("BENCH_ENABLE") == "1":
+        from pathlib import Path
+
+        from bench.controller import BenchConfig, BenchController
+        from bench.recorder import Recorder
+
+        cfg = BenchConfig.from_env(dict(os.environ), settings)
+        recorder = Recorder(Path(os.environ.get("BENCH_OUT", "bench/data/run.jsonl")))
+        controller = BenchController(app.state.telnyx, settings, cfg, recorder)
+        app.state.bench = controller
+        metrics.set_sink(controller)
+        bench_task = asyncio.create_task(controller.run())
+        log.info("bench.enabled", out=str(recorder.path), to=cfg.to_number)
+
     try:
         yield
     finally:
+        if bench_task is not None:
+            bench_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await bench_task
+            metrics.set_sink(None)
         agents: dict[str, VoiceAgent] = app.state.agents
         for agent in list(agents.values()):
             task = agent.run_task
@@ -91,6 +137,11 @@ async def health() -> dict[str, str]:
 @app.post("/webhook")
 async def webhook(request: Request) -> Response:
     """Receive, verify, and dispatch a Telnyx call webhook."""
+    # Earliest server-side receipt timestamps, captured before any parsing so the
+    # bench harness measures from when the event reached us. Both clocks: t_recv
+    # (monotonic) for intra-process deltas, w_recv (wall) to align with the agent.
+    t_recv = time.monotonic()
+    w_recv = time.time()
     settings = request.app.state.settings
 
     # Bounded read: stop buffering past the cap rather than trusting
@@ -132,6 +183,9 @@ async def webhook(request: Request) -> Response:
     event_type = data.get("event_type", "")
     payload = data.get("payload", {})
     call_control_id = payload.get("call_control_id", "")
+    # Telnyx stamps each event with occurred_at; it is the single-clock reference
+    # the bench harness uses for onset and stop (both legs carry it).
+    occurred_at = data.get("occurred_at", "")
 
     structlog.contextvars.bind_contextvars(call_sid=call_control_id)
     # Transcription fires many interim events per turn. Log only finals (the
@@ -144,6 +198,12 @@ async def webhook(request: Request) -> Response:
     else:
         log.info("webhook.received", event_type=event_type)
     try:
+        bench: _BenchHook | None = getattr(request.app.state, "bench", None)
+        if bench is not None and await bench.handle_webhook(
+            event_type, payload, call_control_id, occurred_at, t_recv, w_recv
+        ):
+            # Event was on a harness-owned leg; skip the normal agent dispatch.
+            return Response(status_code=200)
         await _dispatch(request.app, event_type, payload, call_control_id)
     except Exception:
         # A webhook handler failure must not return 5xx and trigger Telnyx

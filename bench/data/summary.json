@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "label": "run1",
+    "stt_engine": "Google",
+    "llm_model": "moonshotai/Kimi-K2.5",
+    "tts_voice": "Telnyx.NaturalHD.astra",
+    "from_number": "+14157180773",
+    "to_number": "+17024255143",
+    "stimulus": "Excuse me, sorry to interrupt, I have a quick question."
+  },
+  "files": [
+    "bench/data/run1.jsonl",
+    "bench/data/run2.jsonl",
+    "bench/data/run3.jsonl"
+  ],
+  "trials_total": 70,
+  "trials_with_total": 32,
+  "metrics": {
+    "total_telnyx": {
+      "n": 32,
+      "min": 927.8390407562256,
+      "median": 1327.8659582138062,
+      "p95": 2250.361490249634,
+      "p99": 2954.765920639039,
+      "max": 3236.917018890381
+    },
+    "onset_to_interim": {
+      "n": 32,
+      "min": 707.8781127929688,
+      "median": 1104.390025138855,
+      "p95": 2115.383303165436,
+      "p99": 2612.561502456666,
+      "max": 2776.911973953247
+    },
+    "interim_to_stop_issued": {
+      "n": 33,
+      "min": 0.608125003054738,
+      "median": 1.256750023458153,
+      "p95": 2.0889252074994147,
+      "p99": 2.251479998230934,
+      "max": 2.2909999825060368
+    },
+    "stop_issued_to_ended": {
+      "n": 32,
+      "min": 69.2214589798823,
+      "median": 202.67695799702778,
+      "p95": 473.04839184798755,
+      "p99": 626.5673400164816,
+      "max": 655.6565000209957
+    },
+    "total_server": {
+      "n": 32,
+      "min": 891.2240830250084,
+      "median": 1299.5236249698792,
+      "p95": 2290.978464944055,
+      "p99": 3013.22558371001,
+      "max": 3237.957874953281
+    }
+  }
+}

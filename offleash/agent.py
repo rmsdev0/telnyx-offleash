@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from offleash import metrics
 from offleash.barge_in import BargeInHandler
 from offleash.conversation import CallContext, Conversation
 from offleash.limits import TokenBudget
@@ -206,7 +207,25 @@ class VoiceAgent:
                     STTEventType.TRANSCRIPT_FINAL,
                 )
                 if is_barge_in_signal and self._barge_in.agent_is_speaking:
+                    if metrics.enabled():
+                        # Component 2 boundary: the moment our code decides to
+                        # stop, just before the playback_stop POST goes out.
+                        metrics.record(
+                            "barge_stop_issued",
+                            call=self._call.id,
+                            t_mono=time.monotonic(),
+                            t_wall=time.time(),
+                        )
                     await self._barge_in.handle_barge_in(self._call.stop_playback)
+                    if metrics.enabled():
+                        # The POST has returned; the leg-level stop is now in
+                        # flight (its completion shows up as call.speak.ended).
+                        metrics.record(
+                            "barge_stop_returned",
+                            call=self._call.id,
+                            t_mono=time.monotonic(),
+                            t_wall=time.time(),
+                        )
                     if self._response_task and not self._response_task.done():
                         self._response_task.cancel()
                     self._turn_manager.set_listening()

@@ -143,11 +143,47 @@ These are the non-obvious Telnyx requirements this agent ran into in practice. E
 - The account must be verified to at least Level 2. Trial accounts prepend an abuse notice onto all Telnyx machine-generated speech, so the agent's voice is replaced by that notice. Add a payment method and complete verification.
 - The transcription language is a short code such as en. The transcription API rejects en-US (which the speak command, confusingly, does accept), so the speak and transcription languages are separate settings.
 
-## Defaults
+## Pipeline options
 
-- LLM: moonshotai/Kimi-K2.5, Telnyx's recommended real-time voice model, with reasoning disabled for latency. Pin a different model with LLM_MODEL.
-- Voice: Telnyx.Natural.abbie. Change it with TTS_VOICE.
-- STT engine: Google (Engine A), for interim results. Change it with STT_ENGINE.
+Each stage is env-swappable. The defaults below are chosen for this architecture (Option A: pure Call Control, transcript-triggered barge-in), not just for raw quality. The current Telnyx catalog is larger than what ships as default; the trade-offs that actually bite this design are called out per stage.
+
+### STT — transcription_start (default: Google / `en`)
+
+Barge-in here fires on the first interim transcript, so the STT engine **must support `interim_results`**. Select an engine with `STT_ENGINE` and a specific model with `STT_MODEL` (blank uses the engine's default):
+
+| `STT_ENGINE` | `STT_MODEL` | Interim? | Notes |
+| --- | --- | --- | --- |
+| `Google` (default) | _(blank)_ | yes | Default. Broad language coverage; legacy phone models. |
+| `Deepgram` | `nova-2`, `nova-3`, `flux` | yes | nova-3 is a clear accuracy upgrade; **flux** adds native turn detection. |
+| `AssemblyAI` | `assemblyai/universal-streaming` | yes | Modern streaming model. |
+| `Soniox` | `soniox/stt-rt-v4` | yes | Auto language detection. |
+| `Speechmatics` | `speechmatics/standard` | yes | Multilingual. |
+| `xAI` | `xai/grok-stt` | yes | |
+| `Telnyx` | `openai/whisper-large-v3-turbo`, `…/whisper-tiny` | **no** | In-house, cheaper/more accurate, but **no interim → barge-in degrades to final-transcript-only**. |
+| `Azure` | _(blank)_ | n/a | No model selection. |
+
+The `STT_ENGINE` + `STT_MODEL` pairing is validated against this matrix at startup ([settings.py](offleash/settings.py)), so a bad combination fails fast instead of 422-ing on the first call. The agent only requests interim results from engines that emit them; a non-interim engine logs `stt.no_interim` and barge-in falls back to final transcripts. Setting `STT_ENGINE=Deepgram` + `STT_MODEL=flux` reaches **Deepgram Flux**, whose native turn detection (~260 ms end-of-turn, −100–300 ms speech-to-response) directly attacks the few-hundred-ms barge-in floor documented in [DISCOVERY.md](DISCOVERY.md). Flux's turn detection can be tuned with `STT_EOT_THRESHOLD` / `STT_EOT_TIMEOUT_MS` (range-validated, applied only for `Deepgram`+`flux`). One caveat remains: the agent still derives end-of-turn from the `is_final` flag, so fully consuming Flux's native EndOfTurn event would mean teaching [turn_manager.py](offleash/turn_manager.py) to key off Flux's turn signal instead — a separate follow-up.
+
+### LLM — Telnyx Inference, OpenAI-compatible (default: moonshotai/Kimi-K2.5)
+
+Kimi-K2.5 (non-reasoning; `enable_thinking` is disabled in code for latency) is Telnyx's explicit real-time-voice recommendation — keep it unless you have a reason. Levers, via `LLM_MODEL`:
+
+- `moonshotai/Kimi-K2.6` — newer Moonshot model; a drop-in upgrade from the K2.5 default.
+- `MiniMaxAI/MiniMax-M2.7` — cheaper, still strong; pick this to optimize spend.
+- `zai-org/GLM-5.1-FP8` — highest intelligence, but heavier/slower; only worth the latency cost if a use case needs deep reasoning.
+
+Model IDs are the ones the account's `GET /v2/ai/models` actually returns; verify availability there if you pin a different one.
+
+### TTS — speak (default: Telnyx.NaturalHD.astra)
+
+| Voice (`TTS_VOICE`) | Tier | Notes |
+| --- | --- | --- |
+| `Telnyx.NaturalHD.astra` (default) | Telnyx-native HD | Higher fidelity, multilingual, handles "um/uh" and laughter; low-latency. |
+| `Telnyx.Natural.abbie` | Telnyx-native | Lowest latency and cost, English-only. |
+| `Telnyx.Ultra.<uuid>` | Telnyx-native | Most expressive; voices are UUID-identified. |
+| `ElevenLabs.*` / `AWS.Polly.*-Neural` / `Azure.*Neural` | third-party | Premium / neural passthrough voices. |
+
+All TTS options are pure env swaps — no code change. `speak` accepts the full locale (`TTS_LANGUAGE=en-US`), unlike transcription which wants the short code.
 
 ## Related
 

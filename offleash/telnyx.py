@@ -18,6 +18,7 @@ from nacl.encoding import Base64Encoder
 from nacl.signing import VerifyKey
 from openai import AsyncOpenAI
 
+from offleash.settings import stt_emits_interim
 from offleash.types import LLMEvent, LLMEventType, ToolCallRequest
 
 if TYPE_CHECKING:
@@ -32,6 +33,22 @@ log = structlog.get_logger()
 # so a verbose model reply (max_tokens is unset on tool turns) degrades to a
 # truncated answer instead of a 422 that drops the whole turn to the fallback.
 MAX_SPEAK_CHARS = 3000
+
+# Telnyx error code for a command issued to a call that has already ended. This
+# is a benign teardown race (the caller hung up while we were cleaning up), so
+# it is logged at info rather than error.
+CALL_ENDED_ERROR_CODE = "90018"
+
+
+def _is_call_ended_error(resp: httpx.Response) -> bool:
+    """True if Telnyx rejected the action because the call already ended."""
+    if resp.status_code != 422:
+        return False
+    try:
+        errors = resp.json().get("errors", [])
+    except Exception:
+        return False
+    return any(str(e.get("code")) == CALL_ENDED_ERROR_CODE for e in errors)
 
 
 def _cap_speak_text(text: str) -> str:
@@ -239,19 +256,49 @@ class Call:
         s = self._client.settings
         # The transcription language enum is stricter than the speak one: it
         # wants a short code like "en" and rejects "en-US" (which speak
-        # accepts), hence the separate stt_language setting. interim_results
-        # yields partial transcripts for snappy barge-in; "inbound" transcribes
-        # the caller's audio on this leg.
-        await self._client.action(
-            self.id,
-            "transcription_start",
-            {
-                "transcription_engine": s.stt_engine,
-                "language": s.stt_language,
-                "interim_results": True,
-                "transcription_tracks": "inbound",
-            },
+        # accepts), hence the separate stt_language setting. "inbound"
+        # transcribes the caller's audio on this leg.
+        payload: dict[str, Any] = {
+            "transcription_engine": s.stt_engine,
+            "language": s.stt_language,
+            "transcription_tracks": "inbound",
+        }
+        # Pick a specific model within engines that host several (Deepgram
+        # nova-3 / flux, etc.); blank means the engine's default.
+        if s.stt_model:
+            payload["transcription_model"] = s.stt_model
+        # Deepgram Flux turn-detection tuning. These are Flux-only params, sent
+        # top-level alongside the model (matching how transcription_model is
+        # passed). A higher eot_threshold makes Flux wait for a clearer
+        # end-of-turn, so one utterance is less likely to split into finals.
+        if s.stt_engine == "Deepgram" and s.stt_model == "flux":
+            if s.stt_eot_threshold is not None:
+                payload["eot_threshold"] = s.stt_eot_threshold
+            if s.stt_eot_timeout_ms is not None:
+                payload["eot_timeout_ms"] = s.stt_eot_timeout_ms
+        # Barge-in fires on interim transcripts, so request them only from
+        # engines that emit them. Asking an engine that cannot risks a 422 that
+        # would leave the call with no transcription at all; for those engines
+        # barge-in degrades to final-transcript-only.
+        if stt_emits_interim(s.stt_engine):
+            payload["interim_results"] = True
+        else:
+            log.warning(
+                "stt.no_interim",
+                engine=s.stt_engine,
+                detail="barge-in will use final transcripts only",
+            )
+        # Log exactly what we send so the engine/model/tuning actually in effect
+        # is visible (and a rejected Flux param shows up next to action_failed).
+        log.info(
+            "transcription.config",
+            engine=s.stt_engine,
+            model=s.stt_model or None,
+            interim=payload.get("interim_results", False),
+            eot_threshold=payload.get("eot_threshold"),
+            eot_timeout_ms=payload.get("eot_timeout_ms"),
         )
+        await self._client.action(self.id, "transcription_start", payload)
 
     async def stop_transcription(self) -> None:
         await self._client.action(self.id, "transcription_stop")
@@ -307,14 +354,20 @@ class TelnyxClient:
             f"/calls/{call_control_id}/actions/{action}", json=payload or {}
         )
         if resp.is_error:
-            # Surface Telnyx's explanation (a 422 names the offending field)
-            # before raising, so failures are diagnosable from the logs.
-            log.error(
-                "telnyx.action_failed",
-                action=action,
-                status=resp.status_code,
-                body=resp.text[:1000],
-            )
+            # A command issued to a call that already ended (e.g. transcription_stop
+            # during teardown, after the caller hung up) is a benign race, not a
+            # failure: log it at info and still raise so callers tear down as before.
+            if _is_call_ended_error(resp):
+                log.info("telnyx.action_skipped_call_ended", action=action)
+            else:
+                # Surface Telnyx's explanation (a 422 names the offending field)
+                # before raising, so failures are diagnosable from the logs.
+                log.error(
+                    "telnyx.action_failed",
+                    action=action,
+                    status=resp.status_code,
+                    body=resp.text[:1000],
+                )
             resp.raise_for_status()
         data: dict[str, Any] = resp.json()
         return data

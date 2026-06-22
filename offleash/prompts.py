@@ -48,7 +48,9 @@ class AgentConfig:
     response_style: str = (
         "Keep responses short and conversational. "
         "Use simple sentences. Ask one question at a time. "
-        "Never use bullet points or numbered lists (the caller cannot see them)."
+        "Never use bullet points, numbered lists, or labeled fields like "
+        "'Name:' or 'Date:'; the caller only hears your voice, so speak every "
+        "detail inline as part of a sentence."
     )
     guardrails: list[str] = field(default_factory=list)
     tools: ToolRegistry | None = None
@@ -110,7 +112,12 @@ def build_system_prompt(
     if context:
         context_parts: list[str] = []
         now = datetime.now(tz=UTC)
-        context_parts.append(f"Current time: {now.strftime('%I:%M %p %Z')}")
+        # Include the date, not just the time: without it the model resolves
+        # relative dates like "tomorrow" against its training cutoff (K2.6 will
+        # invent an absolute date), landing reservations on the wrong day.
+        context_parts.append(
+            f"Current date and time: {now.strftime('%A, %B %d, %Y, %I:%M %p %Z')}"
+        )
         if context.from_number:
             context_parts.append(f"Caller number: {context.from_number}")
         if context.slots:
@@ -160,8 +167,12 @@ _NODES: dict[str, FlowNode] = {
     ),
     "farewell": FlowNode(
         task=(
-            "The reservation is confirmed. Read back the confirmation number "
-            "and the details, thank the caller, and say goodbye."
+            "The reservation is confirmed. In one or two short spoken "
+            "sentences, naturally weave the key details (name, date, time, "
+            "party size) and the confirmation number into flowing speech, then "
+            "thank the caller and say goodbye. Never use a list, bullet points, "
+            "or labeled fields like 'Name:' or 'Date:' — the caller only hears "
+            "your voice, so say it the way you would aloud."
         ),
         tools=[],
         terminal=True,

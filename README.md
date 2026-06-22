@@ -1,8 +1,8 @@
 # telnyx-offleash
 
-A complete Telnyx voice agent. Every layer Telnyx. No console, no leash.
+A complete Telnyx voice agent. Every layer through Telnyx. No console, no leash.
 
-A complete real-time voice phone agent where every layer (transport, speech-to-text, text-to-speech, and LLM inference) is Telnyx, in about 1,600 lines of Python. One vendor, one API key, one private network, end to end.
+A complete real-time voice phone agent where every layer (transport, speech-to-text, text-to-speech, and LLM inference) runs through Telnyx, in about 1,600 lines of Python. One control plane, one API key, end to end. The speech and inference engines reachable through that one Telnyx API include both Telnyx-native and third-party models (see Pipeline options); "through Telnyx" means one integration surface and one bill, not that every model is Telnyx-built.
 
 The line count is honest and checkable. 1,608 lines of code (non-blank, non-comment), 2,188 with blanks and comments, agent only. Run it yourself:
 
@@ -22,7 +22,7 @@ It is built in the open, minimal and bulletproof. It does not depend on the refe
 
 ## Architecture
 
-This is "Option A" from DISCOVERY.md: pure Telnyx Call Control orchestration. Speech-to-text and text-to-speech are issued as call commands and their results arrive as webhooks. There is no media WebSocket to manage.
+This is pure Telnyx Call Control orchestration. Speech-to-text and text-to-speech are issued as call commands and their results arrive as webhooks. There is no media WebSocket to manage.
 
 ```
         PSTN
@@ -72,9 +72,9 @@ The files:
 
 This is what a voice agent built only on Telnyx's public primitives actually looks like, and the primitive surface sets the responsiveness floor.
 
-Telnyx speech-to-text (transcription_start) and text-to-speech (speak) are leg-bound Call Control commands, not stream-attachable: transcripts are delivered as webhooks and speech plays directly onto the call leg. There is no way to point Telnyx STT at a media stream. So a purely single-vendor agent interrupts via a transcript-triggered playback_stop, which sets a barge-in floor that is transcript-bound rather than frame-level. Measured over real PSTN calls, that floor is a median of 1.3 s, about 83% of which is the unavoidable wait for the first STT interim; offleash's own contribution (decide to stop, issue playback_stop) is about 1 ms. The full method, conditions, N, and per-component median/p95/p99 are in [BENCHMARK.md](https://github.com/rmsdev0/telnyx-offleash/blob/bench/barge-in-latency/BENCHMARK.md) on the `bench/barge-in-latency` branch. To keep the floor as low as the primitives allow, this build uses the Google transcription engine for interim results and fires the interrupt on the first interim transcript while the agent is speaking, not on the final.
+Telnyx speech-to-text (transcription_start) and text-to-speech (speak) are leg-bound Call Control commands, not stream-attachable: transcripts are delivered as webhooks and speech plays directly onto the call leg. There is no way to point Telnyx STT at a media stream. So a purely single-vendor agent interrupts via a transcript-triggered playback_stop, which sets a barge-in floor that is transcript-bound rather than frame-level. Measured over real PSTN calls, in this configuration (Google interim transcription triggering playback_stop), that floor is a median of 1.3 s, about 83% of which is the wait for the first STT interim; offleash's own contribution (decide to stop, issue playback_stop) is about 1 ms. The number is specific to this engine and configuration, not a universal Telnyx figure. The full method, conditions, N, and per-component median/p95/p99 are in [BENCHMARK.md](https://github.com/rmsdev0/telnyx-offleash/blob/bench/barge-in-latency/BENCHMARK.md) on the `bench/barge-in-latency` branch. To keep the floor as low as the primitives allow, this build uses the Google transcription engine for interim results and fires the interrupt on the first interim transcript while the agent is speaking, not on the final.
 
-Frame-level barge-in would require running Telnyx Media Streaming for the audio path (bidirectional RTP) in parallel with leg-bound transcription, and detecting speech onset locally with a VAD. That is a real enhancement path, documented in DISCOVERY.md as Option B-lite, and the architecture here does not block it. It is out of scope for v0 by design: the call-command build is smaller, has fewer moving parts, and uses every primitive exactly as Telnyx supports it.
+Frame-level barge-in requires running Telnyx Media Streaming for the audio path (bidirectional RTP) and detecting speech onset locally with a VAD, so the agent reacts to the sound of speech rather than waiting for a transcript. That is a different architecture, and it is its own repo: [telnyx-onset](https://github.com/rmsdev0/telnyx-onset), the media-stream sibling to this call-command build. offleash is the smaller, call-command implementation; onset is the media-stream implementation with frame-level interruption. Pick offleash for turn-based agents where the caller does not talk over the system, and onset when you need natural, interruption-heavy conversation.
 
 ## Benchmark: barge-in latency
 

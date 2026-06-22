@@ -321,6 +321,34 @@ async def test_new_turn_supersedes_in_flight_response(settings) -> None:
 
 
 @pytest.mark.asyncio
+async def test_barge_in_by_final_keeps_the_caller_words(settings) -> None:
+    # When a *final* transcript triggers barge-in (typical with Deepgram Flux's
+    # turn detection), its words must become the next turn, not be discarded.
+    fake = FakeCall(auto_complete_speak=False)  # greeting keeps the agent speaking
+    agent = _make_agent(settings, fake, rounds=[text_round("Checking now.")])
+    agent.start()
+
+    await until(lambda: agent._barge_in.agent_is_speaking)
+    assert fake.speaks[0] == RESTAURANT_CONFIG.greeting
+
+    # Let the response that follows the barge-in complete.
+    fake._auto = True
+    # A final interrupts the greeting AND carries the caller's request.
+    agent.submit_transcript("Book a table for tomorrow at 2 PM.", is_final=True)
+
+    # The barged final drives a real turn: the LLM round runs and is spoken.
+    await until(lambda: "Checking now." in fake.speaks)
+    user_turns = [
+        m["content"] for m in agent._conversation.to_log_dict() if m["role"] == "user"
+    ]
+    assert "Book a table for tomorrow at 2 PM." in user_turns
+
+    agent.submit_hangup()
+    await asyncio.wait_for(agent.run_task, timeout=2.0)
+    assert agent.run_task.exception() is None
+
+
+@pytest.mark.asyncio
 async def test_barge_in_then_next_turn_is_handled(settings) -> None:
     # Barge-in must not wedge the agent: a final after the interruption drives a
     # real new turn.

@@ -200,16 +200,28 @@ class VoiceAgent:
                     continue
 
                 # Barge-in: a transcript (interim or final) while the agent is
-                # speaking. Interim is the snappier trigger and fires first.
+                # speaking. Interim is the snappier trigger; Deepgram Flux, with
+                # turn detection, more often delivers a final as the first signal.
                 is_barge_in_signal = event.type in (
                     STTEventType.TRANSCRIPT_INTERIM,
                     STTEventType.TRANSCRIPT_FINAL,
                 )
                 if is_barge_in_signal and self._barge_in.agent_is_speaking:
                     await self._barge_in.handle_barge_in(self._call.stop_playback)
+                    # Reap the interrupted response before touching turn state: its
+                    # finally records the spoken-so-far partial and calls
+                    # set_listening(), so a kept transcript must be re-seated after.
                     if self._response_task and not self._response_task.done():
                         self._response_task.cancel()
+                        with contextlib.suppress(Exception):
+                            await self._response_task
                     self._turn_manager.set_listening()
+                    # A final carries the caller's actual words; keep them as the
+                    # start of the next turn (its queued UtteranceEnd completes it)
+                    # so barge-in does not swallow the utterance. An interim has no
+                    # committed text, so just reset and wait for the real turn.
+                    if event.type == STTEventType.TRANSCRIPT_FINAL:
+                        self._turn_manager.handle_event(event)
                     continue
 
                 user_turn = self._turn_manager.handle_event(event)

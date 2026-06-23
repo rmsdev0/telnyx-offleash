@@ -12,7 +12,7 @@ find offleash -name '*.py' -exec grep -vE '^\s*(#|$)' {} + | wc -l
 
 ## The gap it fills
 
-Telnyx ships every primitive a self-hosted voice agent needs, but no open reference assembles them into a controllable conversational loop with real tool calling. The managed Telnyx AI Assistant is the leashed version: configured in a console, with no real control over the tool loop, the prompt, the model, or the turn behavior. This repo is the same primitives with the leash off and the developer holding it:
+Telnyx open reference assembley, into a controllable conversational loop with real tool calling. The managed Telnyx AI Assistant is configured in a console, lacking control in core areas. This repo is the same primitives with the leash off:
 
 - Real tool calling: functions you define, dispatched and looped in your own code (see the restaurant demo).
 - Model and prompt tuning: the system prompt is rebuilt every turn from live state, and the model is a value you set.
